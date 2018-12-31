@@ -1,513 +1,595 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-### Please see README for documentation 
-
-from __future__ import division
-import sys
-import timeit
-import numpy as np
-from numpy.linalg import norm
-from sklearn.preprocessing import LabelBinarizer
-import cPickle
-from collections import Counter
-from heapq import nsmallest
-import math
+import os
 import random
-import itertools
-np.random.seed(3)
-
-class NeuralNet(object):
-    def __init__(self, alpha=0.3, iterations=4000, lambd=0.7, keep_prob=0.8, layer_dims=[192, 128, 64, 4]):
-        self.set_parameters(alpha, iterations, lambd, keep_prob, layer_dims)
-
-    def set_parameters(self, alpha, iterations, lambd, keep_prob, layer_dims):
-        self.alpha = alpha
-        self.iterations = iterations
-        self.lambd = lambd
-        self.keep_prob = keep_prob
-        self.layer_dims = layer_dims
-        self.initialize_parameters(layer_dims)
-
-    def initialize_parameters(self, layer_dims):
-        self.parameters = {}
-        for l in range(1, len(layer_dims)):
-            self.parameters["W" + str(l)] = np.random.randn(layer_dims[l], layer_dims[l-1]) * np.sqrt(2 / layer_dims[l - 1])
-            self.parameters["b" + str(l)] = np.zeros((layer_dims[l], 1))
-
-    def sigmoid(self, Z):
-        return 1 / (1 + np.exp(-Z))
-
-    def softmax(self, Z):
-        Z_exp = np.exp(Z - np.max(Z))
-        Z_sum = np.sum(Z_exp, axis=0, keepdims=True)
-        return Z_exp / Z_sum
-
-    def relu(self, Z):
-        return np.maximum(0, Z)
-
-    def dropout(self, A):
-        D = np.random.rand(A.shape[0], A.shape[1])
-        D = D < self.keep_prob
-        A = A * D
-        A = A / self.keep_prob
-        return A, D
-
-    def linear_fwd_activation(self, A_prev, W, b, activation):
-        Z = np.dot(W, A_prev) + b
-
-        if activation == "sigmoid":
-            A = self.sigmoid(Z)
-            cache = ((A_prev, W, b), Z)
-
-        elif activation == "relu":
-            A = self.relu(Z)
-            A, D = self.dropout(A)
-            cache = ((A_prev, W, b), Z, D)
-
-        elif activation == "softmax":
-            A = self.softmax(Z)
-            cache = ((A_prev, W, b), Z)
-
-        return A, cache
-
-    def forward_propogation_with_dropout(self, X):
-        caches = []
-        L = len(self.layer_dims) - 1
-
-        A = X
-        for l in range(1, L):
-            A_prev = A
-            W = self.parameters["W" + str(l)]
-            b = self.parameters["b" + str(l)]
-            A, cache = self.linear_fwd_activation(A_prev, W, b, "relu")
-            caches.append(cache)
-
-        W = self.parameters["W" + str(L)]
-        b = self.parameters["b" + str(L)]
-        AL, cache = self.linear_fwd_activation(A, W, b, "softmax")
-        caches.append(cache)
-
-        return AL, caches
-
-    def cross_entropy_softmax(self, AL, ZL, Y):
-#        return - np.sum(np.multiply(Y, np.log(AL)))
-        return - np.sum(np.multiply(Y, ZL - np.log(np.sum(np.exp(ZL), axis=0, keepdims=True))))
-
-    def compute_cost(self, AL, Y, caches):
-        m = Y.shape[1]
-        L = len(self.layer_dims) - 1
-
-#       For Sigmoid
-#        cross_entropy_cost = (-1/m) * np.sum( np.multiply(Y, np.log(AL)) + np.multiply(1-Y, np.log(1-AL)) )
-
-        ZL = caches[-1][1]
-        cross_entropy_cost = self.cross_entropy_softmax(AL, ZL, Y) / m
-
-        W_sum = 0
-        for l in range(1, L+1):
-            W_sum += np.sum(np.square(self.parameters["W"+str(l)]))
-        regularized_cost = self.lambd * W_sum / (2 * m)
-
-        cost = np.squeeze(cross_entropy_cost) + regularized_cost
-        return cost
-
-    def linear_backward(self, dZ, cache, l):
-        A_prev, W, b = cache
-        m = A_prev.shape[1]
-
-        W = self.parameters["W" + str(l)]
-
-        dW = (1/m) * np.dot(dZ, A_prev.T) + (self.lambd * W) / m
-        db = (1/m) * np.sum(dZ, axis=1, keepdims=True)
-        dA_prev = np.dot(W.T, dZ)
-
-        return dA_prev, dW, db
-
-    def dZL(self, AL, Y):
-        return AL - Y
-
-    def linear_activation_backward(self, dA, cache, activation, l):
-        ((A_prev, W, b), Z, D) = cache
-
-        if activation == "relu":
-            dA = dA * D                 # Dropout
-            dA = dA / self.keep_prob
-            dZ = np.array(dA, copy=True)
-            dZ[Z <= 0] = 0
-
-        elif activation == "sigmoid":
-            t = self.sigmoid(-Z)
-            dZ = dA * t * (1-t)
-
-        elif activation == "softmax":
-            t = self.softmax(Z)
-            dZ = t - Z
-
-        dA_prev, dW, db = self.linear_backward(dZ, (A_prev, W, b), l)
-
-        return dA_prev, dW, db
-
-    def backpropogation(self, AL, Y, caches):
-        grads = {}
-        L = len(caches)
-        Y = Y.reshape(AL.shape)
-        cache = caches[L-1]
-
-#        dAL = - (np.divide(Y, AL) - np.divide(1 - Y, 1 - AL))
-#        grads["dA"+str(L)], grads["dW"+str(L)], grads["db"+str(L)] = self.linear_activation_backward(dAL, cache, "sigmoid", L)
-
-        grads["dA"+str(L)], grads["dW"+str(L)], grads["db"+str(L)] = self.linear_backward(self.dZL(AL, Y), cache[0], L)
-        for l in range(L-1, 0, -1):
-            cache = caches[l-1]
-            dA_prev_temp, dW_temp, db_temp = self.linear_activation_backward(grads["dA"+str(l+1)], cache, "relu", l)
-            grads["dA" + str(l)] = dA_prev_temp
-            grads["dW" + str(l)] = dW_temp
-            grads["db" + str(l)] = db_temp
-
-        return grads
-
-    def lrate(self, epoch):
-        drop = 0.5
-        epochs_drop = 1000
-        lr = self.alpha * math.pow(drop, math.floor((1+epoch)/epochs_drop))
-        return lr
-
-    def update_parameters(self, grads, i):
-        L = len(self.layer_dims) - 1
-        for l in range(1, L+1):
-            self.parameters["W"+str(l)] -= self.alpha * grads["dW"+str(l)]
-            self.parameters["b"+str(l)] -= self.alpha * grads["db"+str(l)]
-
-    def train(self, X_train, y_train):
-        X = X_train
-        Y = y_train
-
-        costs = [(0,0)]
-        for i in xrange(self.iterations + 1):
-            AL, caches = self.forward_propogation_with_dropout(X)
-
-            cost = self.compute_cost(AL, Y, caches)
-
-            grads = self.backpropogation(AL, Y, caches)
-
-            self.update_parameters(grads, i)
-
-            if i%100 == 0:
-                if i % 1000 == 0:
-                    self.alpha /= 1.5
-                costs.append((i, cost))
-                _, acc = self.test(X, Y)
-                print "Iteration", i, "->", "Accuracy", acc, "|| Cost", cost
-
-    def forward_propogation(self, X):
-        L = len(self.layer_dims) - 1
-
-        A = X
-        for l in range(1, L):
-            A_prev = A
-            W = self.parameters["W" + str(l)]
-            b = self.parameters["b" + str(l)]
-            Z = np.dot(W, A_prev) + b
-            A = self.relu(Z)
-
-        W = self.parameters["W" + str(L)]
-        b = self.parameters["b" + str(L)]
-        ZL = np.dot(W, A) + b
-        AL = self.softmax(ZL)
-
-        return AL
-
-    def test(self, X_test, y_test):
-        X_t = X_test
-        Y_t = y_test
-        AL = self.forward_propogation(X_t)
-
-        original = Y_t.argmax(0)
-        predicted = AL.argmax(0)
-        m = len(original)
-        incorrect = np.count_nonzero(original - predicted)
-        return predicted, round((m - incorrect) / m, 4) * 100
-
-
-class KNN(object):
-    def __init__(self, k=7):
-        self.k = k
-
-    def train(self, X_train, y_train):
-        self.X_train, self.y_train = X_train, y_train
-
-    def test(self, X_test, y_test):
-        correct = 0
-        pred = []
-        for X_ins, y_ins in zip(X_test, y_test):
-            predict = self.predict(X_ins)
-            pred.append(predict)
-            if y_ins == predict:
-                correct += 1
-        return pred, round(correct/len(X_test), 4) * 100
-
-    def predict(self, p):
-        class_count = Counter(self.nearest_neighbours(p))
-        return class_count.most_common()[0][0]
-
-    def nearest_neighbours(self, p):
-        distances = norm(self.X_train - p, axis=1)
-        neighbors = zip(distances, self.y_train)
-        k_nearest = nsmallest(self.k, neighbors, key=lambda x: x[0])
-        return map(lambda x: x[1], k_nearest)
-
-# k: number of decision stumps
-class AdaBoost(object):
-    def __init__(self, k = 500):
-        self. k = k
-
-    def train(self, X_train, y_train, variables):
-        possible_pairs = get_possible_pairs()
-        y_unique = list(set(y_train))
-        vote_classifier = {}
-        weights = np.array([float(1)/float(len(y_train))]*len(y_train))
-        for variable in variables:
-            error = 0
-            index1 = variable[0]
-            index2 = variable[1]
-            decision_stump = []
-            decision_stump_category = {'Positive':{},'Negative':{}}
-            #y_category = {}
-            #count_y_category = 0
-            for i in xrange(0, len(X_train)):
-                if X_train[i][index1] >= X_train[i][index2]:
-                    decision_stump.append('Positive')
-                    try:
-                        decision_stump_category['Positive'][y_train[i]] += 1
-                    except:
-                        decision_stump_category['Positive'][y_train[i]] = 1
-                        #y_category[y_train[i]] = count_y_category
-                        #count_y_category += 1
-                else:
-                    decision_stump.append('Negative')
-                    try:
-                        decision_stump_category['Negative'][y_train[i]] += 1
-                    except:
-                        decision_stump_category['Negative'][y_train[i]] = 1
-                        #y_category[y_train[i]] = count_y_category
-                        #count_y_category += 1
-
-
-            Positive_Class = max(decision_stump_category['Positive'], key=lambda k: decision_stump_category['Positive'][k])
-            Negative_Class = max(decision_stump_category['Negative'], key=lambda k: decision_stump_category['Negative'][k])
-            decision_stump_classification = []
-            for i in xrange(0, len(y_train)):
-                if decision_stump[i] == 'Positive':
-                    decision_stump_classification.append(Positive_Class)
-                else:
-                    decision_stump_classification.append(Negative_Class)
-                if decision_stump_classification[i] != y_train[i]:
-                    error = error + weights[i]
-
-            if error > 0.5:
-                continue
-
-            for i in xrange(0, len(y_train)):
-                if decision_stump_classification[i] == y_train[i]:
-                    weights[i] = weights[i]*error/(1.0-error)
-
-            #Normalizing weights
-            sum_weights = sum(weights)
-            weights = weights / sum_weights
-            vote_classifier[variable] = {}
-            vote_classifier[variable]['weight'] = math.log((1-error) / error)
-            vote_classifier[variable]['Positive_Class'] = Positive_Class
-            vote_classifier[variable]['Negative_Class'] = Negative_Class
-
-        return vote_classifier, y_unique
-
-    def test(self, X_test, y_test, vote_classifier, y_unique):
-        possible_pairs = get_possible_pairs()
-        y_unique_dict = {}
-        y_unique_dict[y_unique[0]] = 1
-        y_unique_dict[y_unique[1]] = -1
-        classification = [0] * len(y_test)
-        classifiers = vote_classifier
-        for classifier in classifiers:
-            index1 = classifier[0]
-            index2 = classifier[1]
-            for i in list(range(0,len(y_test))):
-                if X_test[i][index1] >= X_test[i][index2]:
-                    vote = classifiers[classifier]['Positive_Class']
-                    classification[i] = classification[i] + y_unique_dict[vote]*classifiers[classifier]['weight']
-                else:
-                    vote = classifiers[classifier]['Negative_Class']
-                    classification[i] = classification[i] + y_unique_dict[vote]*classifiers[classifier]['weight']
-        classification_category = []
-        for i in xrange(0, len(y_test)):
-            if classification[i] >= 0:
-                classification_category.append(y_unique[0])
+import numpy as np
+from collections import Counter
+import json
+import sys
+
+# REPORT
+#
+# UPLOADED PDF FILES FOR INDIVIDUAL ALGORITHM IN GITHUB
+#
+# Best Algorithm:
+#   Our best algorithm is KNN.
+#
+
+# Adaboost Algorithm
+def trainAdaboost(train,model_file):
+    print("TRAINING STARTED....This takes around 2 minute")
+    raw = []
+    train_image_name = []
+    train_pixels = []
+
+    with open(train) as f:
+        for line in f:
+            raw = line.split()
+            train_image_name.append(raw[0])
+            train_pixels.append(np.array([int(i) for i in raw[1:194]]))
+
+    train_pixels = np.array(train_pixels)
+    indices = []
+    for i in range(1, 192):
+        for j in range(i, 192):
+            indices.append((i, j))
+    train_parameter = {"stump": [], "angle": [], "a": []}
+
+    random.seed(0)
+    stumps = random.sample(indices, 500)
+
+    for stump in stumps:
+
+        weights = np.array([float(1 / len(train_pixels))] * len(train_pixels))
+
+        error = 0
+        count = 0
+
+        positive = train_pixels[train_pixels[:, stump[0]] >= train_pixels[:, stump[1]]][:, 0]
+        negative = train_pixels[train_pixels[:, stump[0]] < train_pixels[:, stump[1]]][:, 0]
+
+        if len(positive) > 0:
+            positive_class = Counter(positive).most_common()[0][0]
+        if len(negative) > 0:
+            negative_class = Counter(negative).most_common()[0][0]
+
+        temp_class = []
+
+        sign = train_pixels[:, stump[0]] >= train_pixels[:, stump[1]]
+
+        for i2 in range(len(sign)):
+            if sign[i2] == True:
+                temp_class.append(positive_class)
             else:
-                classification_category.append(y_unique[1])
-        return classification_category
+                temp_class.append(negative_class)
+            if temp_class[i2] != train_pixels[i2][0]:
+                count += 1
+
+        error = count / len(train_pixels)
+
+        if error > .75:
+            continue
+        a = np.log((1 - error) / error) + np.log(3)
+
+        for i5 in range(len(train_pixels)):
+            if temp_class[i5] != train_pixels[i5][0]:
+                weights[i5] = weights[i5] * np.exp(a)
+
+        train_parameter["stump"].append((int(stump[0]), int(stump[1])))
+        train_parameter["angle"].append((int(positive_class), int(negative_class)))
+        train_parameter["a"].append(float(a))
+
+    file = open(model_file, 'w')
+    file.write(json.dumps(train_parameter))
+    file.close()
+    print("TRAINING IS DONE")
 
 
-def read_file(fname, shuffle_data=True):
-    print "Reading data from", fname, "..."
-    image = np.loadtxt(fname, usecols=0, dtype=str)  # .reshape(len(X), 1)
-    X = np.loadtxt(fname, usecols=range(2, 194), dtype=int)
-    y = np.loadtxt(fname, usecols=1, dtype=int)  # .reshape(len(X), 1)
+def testAdaboost(test,model_file):
+    print("TESTING STARTED")
+    test_raw = []
+    test_image_name = []
+    test_pixels = []
 
-    if shuffle_data:
-        shuffle_indices = range(len(y))
-        np.random.shuffle(shuffle_indices)
-        X  = X[shuffle_indices, ]
-        y = y[shuffle_indices, ]
-        image = image[shuffle_indices, ]
+    with open(test) as f:
+        for line in f:
+            test_raw = line.split()
+            test_image_name.append(test_raw[0])
+            test_pixels.append(np.array([int(i) for i in test_raw[1:194]]))
 
-    return list(image), X/255, y
+    test_pixels = np.array(test_pixels)
+    file = open(model_file, 'r');
+    parameters = json.load(file)
+    ans = []
+    count1 = 0
+    output = open("output_adaboost.txt", "w")
+    for i in range(len(test_pixels)):
+        temp_ans = {0: 0, 90: 0, 180: 0, 270: 0}
+        for j in range(len(list(parameters.values())[0])):
+            index1, index2 = list(parameters.values())[0][j]
+            angle1, angle2 = list(parameters.values())[1][j]
+            w = list(parameters.values())[2][j]
+            if test_pixels[i][index1] >= test_pixels[i][index2]:
+                temp_ans[angle1] += w
+            else:
+                temp_ans[angle2] += w
+        ans.append(test_image_name[i] + " " + str(list(temp_ans.keys())[list(temp_ans.values()).index(max(list(temp_ans.values())))]))
+        if int(ans[i].split()[1]) == test_pixels[i][0]:
+            count1 += 1
+        output.writelines("%s\n" % ans[i])
+    print("THE ACCURACY IS")
+    print(count1 / len(test_pixels))
+    output.close()
+################################################################################
+# FOREST
+# I have referred to this link for the implementation of the decision tree:
+# https://www.cs.purdue.edu/homes/ribeirob/courses/Spring2018/notes/decision_tree.html
 
-def transform_Y_for_NN(Y):
-    lb = LabelBinarizer()
-    lb.fit(Y)
-    return lb
-
-def get_possible_pairs():
-    global n_features
-    possible_pairs = []
-    for x in xrange(n_features):
-        for y in xrange(x, n_features):
-            if x==y:
+def trainForest(train,model_file):
+    global tree_list,train_ratio,train_len,train_size,max_depth,min_sample
+    print('TRAINING HAS STARTED FOR DECISION FOREST!! This takes around 21 minutes')
+    def read(fname):
+        X = np.loadtxt(fname, usecols=range(2,194))
+        Y = np.loadtxt(fname,usecols=1)
+        return X, Y
+    global X,Y
+    X,Y = read(train)
+    Xy = np.column_stack((X,Y))
+    global threshold_values
+    threshold_values = np.median(X,axis=0)
+    
+    def random_indices(n):
+        a = np.arange(len(Xy))
+        np.random.shuffle(a)
+        return a[0:n]
+        
+    def gini_score(groups,classes):
+        n_samples = sum([len(group) for group in groups])
+        gini = 0
+        for group in groups:
+            size = float(len(group))
+            if size == 0:
                 continue
-            possible_pairs.append((x,y))
-    return possible_pairs
+            score = 0.0
+            #print(size)
+            for class_val in classes:
+                #print(group.shape)
+                p = (group[:,-1] == class_val).sum() / size
+                score += p * p
+            gini += (1.0 - score) * (size / n_samples)
+            #print(gini)
+        return gini
+    
+    def split(feat,data):
+        val = threshold_values[feat]
+        left, right = np.array([]).reshape(0,len(data[0])), np.array([]).reshape(0,len(data[0]))
+        for row in data:
+            if row[feat]<=val:
+                left = np.vstack((left,row))
+            else:
+                right = np.vstack((right,row))
+        return left,right
+    
+    def best_split(data):
+        classes = list(set(row[-1] for row in data))
+        b_feat, b_value, b_score, b_groups = 999,999,999,None
 
-def to_file(image, pred):
-    f = open('output.txt', 'w')
-    for line in xrange(len(image)):
-        f.write(image[line] + ' ' + str(pred[line]) + '\n')
-    f.close()
 
+        for feature in range(data.shape[1]-1):
+            groups = split(feature,data)
+            gini = gini_score(groups,classes)
+            value = threshold_values[feature]
+            if gini<b_score:
+                b_feat, b_score, b_groups, b_value = feature, gini, groups, value
 
-if __name__ == "__main__":
-    task, fname, model_file, model = sys.argv[1:]
+        return {'index':b_feat,'value':b_value,'groups':b_groups}
+        
+    def terminal(group):
+        outcomes = [row[-1] for row in group]
+        return max(set(outcomes), key=outcomes.count)
+    
+    def branch(node, max_depth, min_sample, depth):
+        left, right = node['groups']
+        del(node['groups'])
+    
+        if not isinstance(left,np.ndarray) or not isinstance(right,np.ndarray):
+            node['left'] = node['right'] = terminal_node(np.concatenate(left,right))
+            return
 
-    image, X, y = read_file(fname, shuffle_data=True)
+        if depth >= max_depth:
+            node['left'],node['right'] = terminal(left),terminal(right)
+            return
 
-    if task == "train":
-        print "Training", model, "model..."
-        tic = timeit.default_timer()
-
-        if model == "nearest":
-            knn = KNN(k=9)
-            knn.train(X, y)
-            models = (knn)
-
-        elif model == "adaboost":
-            k = 500
-            n_features = X.shape[1]
-            possible_pairs = get_possible_pairs()
-            n_labels = len(set(y))
-            num_variables = int(n_labels * (n_labels-1) / 2)
-            variables = []
-            for i in range(num_variables):
-                variables.append(random.sample(possible_pairs, k))
-            y_trains = {}
-            X_trains = {}
-            for label in set(y):
-                y_trains[label] = []
-                X_trains[label] = []
-            for i, label in enumerate(y):
-                y_trains[label].append(y[i])
-                X_trains[label].append(X[i])
-
-            X_train_pairs = []
-            y_train_pairs = []
-            for c1, c2 in list(itertools.combinations(set(y),2)):
-                X_train_pairs.append(X_trains[c1] + X_trains[c2])
-                y_train_pairs.append(y_trains[c1] + y_trains[c2])
-
-            adaboost = AdaBoost(k)
-
-            vote_classifier_y_unique = []
-            for i in range(num_variables):
-                vote_classifier_y_unique.append(adaboost.train(X_train_pairs[i], y_train_pairs[i], variables[i]))
-
-            models = (vote_classifier_y_unique, adaboost)
-
-        elif model == "nnet" or model == "best":
-            lb = transform_Y_for_NN(y)
-            Y_lb = lb.transform(y)
-
-            alpha = 0.3
-            iterations = 2000
-            lambd = 0.5
-            keep_prob = 0.6
-            layers = [X.shape[1]] + [193, 64] + [Y_lb.shape[1]]
-
-            nnet = NeuralNet(alpha=alpha, iterations=iterations, lambd=lambd,
-                             keep_prob=keep_prob, layer_dims=layers)
-
-            nnet.train(X.T, Y_lb.T)
-
-            models = (lb, nnet)
+        if len(left)<=min_sample:
+            node['left']=terminal(left)
         else:
-            print "Model not found"
+            node['left']=best_split(left)
+            branch(node['left'],max_depth,min_sample,depth+1)
 
-        cPickle.dump(models, open(model_file, "wb"), protocol=2)
-        toc = timeit.default_timer()
-        print "Time taken", int(toc - tic), "seconds"
-
-    else:
-        print "Testing", model, "model..."
-        tic = timeit.default_timer()
-
-        models = cPickle.load(open(model_file, "rb"))
-
-        if model == "nearest":
-            knn = models
-            pred, score = knn.test(X, y)
-            print("Writing to a file...")
-            to_file(image, pred)
-
-        elif model == "adaboost":
-            n_labels = len(set(y))
-            num_variables = int(n_labels * (n_labels-1) / 2)
-            n_features = X.shape[1]
-
-            vote_classifier_y_unique, adaboost = models
-            classification_category = []
-            for i in range(num_variables):
-                classification_category.append(adaboost.test(X, y, vote_classifier_y_unique[i][0], vote_classifier_y_unique[i][1]))
-
-            final_classification = []
-            count_correct = 0
-
-            for i in xrange(y.shape[0]):
-                lst = []
-                for pair in range(num_variables):
-                    lst += [classification_category[pair][i]]
-                final_classification.append(max(lst,key=lst.count))
-                if final_classification[i] == y[i]:
-                    count_correct += 1
-
-            score = round(float(count_correct)/float(len(y)), 2)*100
-
-            print("Writing to a file...")
-            to_file(image, final_classification)
-            # f = open('output.txt', 'w')
-            # for line in range(y.shape[0]):
-                # f.write(image[line] + ' ' + str(final_classification[line]) + '\n')
-            # f.close()
-
-        elif model == "nnet" or model == "best":
-            lb, nnet = models
-            Y_lb = lb.transform(y)
-            pred, score = nnet.test(X.T, Y_lb.T)
-            pred *= 90
-            print("Writing to a file...")
-            to_file(image, pred)
-
+        if len(right)<=min_sample:
+            node['right']=terminal(right)
         else:
-            print "Model not found"
+            node['right'] = best_split(right)
+            branch(node['right'],max_depth,min_sample,depth+1)
+        
+    def tree(data,max_depth,min_sample):
+        root = best_split(data)
+        branch(root,max_depth,min_sample,1)
+        return root
+        
+    def predict(model_tree,data):
+        if data[model_tree['index']] < model_tree['value']:
+            if isinstance(model_tree['left'],dict):
+                return predict(model_tree['left'],data)
+            else:
+                return model_tree['left']
+        else:
+            if isinstance(model_tree['right'],dict):
+                return predict(model_tree['right'],data)
+            else:
+                return model_tree['right']
+                
+    tree_list = []
+    num_trees = 30
+    train_ratio = 0.03
+    train_len = len(Xy)
+    train_size = int(train_ratio*train_len)
+    max_depth = 5
+    min_sample = 50
+    
+    for i in range(num_trees):
+        indices = random_indices(train_size)
+        new_tree = tree(Xy[indices],max_depth,min_sample)
+        tree_list.append(new_tree)
+    
+    model_file1 =  model_file
+    file = open(model_file1, 'w')
+    file.write(json.dumps(tree_list))
+    file.close()
+    def accuracy(tX,tY,tXy,tree_list):
+        correct = 0
+        for i in range(len(tX)):
+            row = tX[i]
+            class_counts = {0:0,90:0,180:0,270:0}
+            for j in range(len(tree_list)):
+                prediction = int(predict(tree_list[j],row))
+                class_counts[prediction] += 1
+            labels = list(class_counts.values())
+            key_index = labels.index(max(labels))
+            final = list(class_counts.keys())[key_index]
+            if final==tY[i]:
+                correct+=1
+        
 
-        print ("Accuracy", score, "%")
-        toc = timeit.default_timer()
-        print ("Time taken", int(toc - tic), "seconds")
+        ac = correct/len(tY)
+        return ac
+        
+    print('TRAINING HAS ENDED FOR DECISION FOREST')
+    accu = accuracy(X,Y,Xy,tree_list)
+    print('Train Accuracy is :',accu)
+    
+    
+    
+def testForest(test,model_file):
+    print('TESTING HAS STARTED FOR DECISION FOREST!!')
+    file1 = open(model_file,'r')
+    parameters = json.load(file1)
+    file_names = np.loadtxt(test ,dtype='str',usecols=0).tolist()
+    
+    def read(fname):
+        X = np.loadtxt(fname, usecols=range(2,194))
+        Y = np.loadtxt(fname,usecols=1)
+        return X, Y
+    global X,Y
+    X,Y = read(test)
+    Xy = np.column_stack((X,Y))
+    file = open(model_file, 'r');
+    
+    def predict(model_tree,data):
+        if data[model_tree['index']] < model_tree['value']:
+            if isinstance(model_tree['left'],dict):
+                return predict(model_tree['left'],data)
+            else:
+                return model_tree['left']
+        else:
+            if isinstance(model_tree['right'],dict):
+                return predict(model_tree['right'],data)
+            else:
+                return model_tree['right']
+    
+    def accuracy(tX,tY,tXy,tree_list):
+        correct = 0
+        for i in range(len(tX)):
+            row = tX[i]
+            class_counts = {0:0,90:0,180:0,270:0}
+            for j in range(len(tree_list)):
+                prediction = int(predict(tree_list[j],row))
+                class_counts[prediction] += 1
+            labels = list(class_counts.values())
+            key_index = labels.index(max(labels))
+            final = list(class_counts.keys())[key_index]
+            if final==tY[i]:
+                correct+=1
+
+        accuracy = correct/len(tY)
+        return accuracy
+    
+    accu = accuracy(X,Y,Xy,parameters)
+    
+    print(' Test Accuracy is : ',accu)
+    
+    def final_prediction(row,tree_list):
+        class_counts = {0:0,90:0,180:0,270:0}
+        for j in range(len(tree_list)):
+            prediction = int(predict(tree_list[j],row))
+            class_counts[prediction] += 1
+        labels = list(class_counts.values())
+        key_index = labels.index(max(labels))
+        final = list(class_counts.keys())[key_index]
+        return final
+    
+    predictions = []
+    for row in X:
+        predictions.append(final_prediction(row,parameters))
+       
+    output = open("output_forest.txt", "w")
+    for i in range(len(X)):
+        term=str(file_names[i])+' '+str(predictions[i])
+        output.writelines("%s\n" % term)
+    
+    print('Testing done')
+    
+    
+#################################################################################
+#<<<<<<< HEAD
+def trainNearest(train,model_file):
+    print("Training Phase : Since KNN does not have training phase, this creates model_file.txt, which copies the examples from the training_file.txt")
+
+    train = open(train, 'r')
+    model = open(model_file, 'w')
+
+    for line in train:
+        model.writelines(line)
+
+    train.close()
+    model.close()
+#    pass
+def testNearest(test, model_file):
+    ######################################################################
+    # Discussion
+    # By first implementation of the KNN, it was too slow. Below are the ways that
+    # I have tried to figure out the problem.
+    # Maybe reducing the dist list size may speed up the computation
+    # Instead of using np.linalg.norm, I will take step by step: diff -> square -> sum -> take a sqrt ===> got faster
+    # Rules 1) Lowering Dimension will significantly make computation cheaper
+    #       2) Lowering the train_set size will also significantly make computation cheaper.
+    #
+    #
+    # 12/06
+    # *** We need to increase K for better classification. I am going to try multiple Ks and see what has better accuracy on test data
+    # *** To do the upper, we need to make the computation cheaper.
+    # ***By R analysis: some variables are more important than others : have lower p-value and have higher significance.
+    #
+    # 12/07
+    # *** What will be better? Have a big distance list and take ordered() and take different votes? or calculate k-nearest neighbors
+    # as many as counts of k. Will the big distance list small enough for the memory to stand it# ? Yes. Able to stand it. Let's do this.
+    #
+    # 12/08
+    # *** Succeeded in making a big data list and extracting K smallest training points
+    # *** By this, I was able to try multiple Ks for one big data list ==> Much faster computation time
+    ######################################################################
+    ######################################################################
+    # Reading the File
+    ######################################################################
+
+    def readfile(file):
+        photo_id = []
+        orientation = []
+        pixel_value = []
+        with open(file, 'r') as f:
+            for line in f:
+                tmp = line.split()
+
+                # id
+                id_tmp = tmp[0]
+                photo_id.append(id_tmp)
+
+                # orientation
+                ot_tmp = tmp[1]
+                orientation.append(ot_tmp)
+
+                # pixel value
+                px_tmp = [int(val) for val in tmp[2:]]
+                pix_tmp = []
+                for i in range(0, len(px_tmp), 3):
+                    pix_tmp.append(px_tmp[i: i + 3])
+
+                pixel_value.append(pix_tmp)
+
+        return (photo_id, orientation, pixel_value)
+
+    ######################################################################
+    # K-nearest-neighbors
+    ######################################################################
+
+    # Input: K(needs to be a list), train_px, test_px, train_ot
+    # Output: Estimated Class for Test Images
+
+    def k_nearest_neighbors(K, train_px, test_px, train_ot):
+        # calculate Euclidean distance for each test examples with the whole training set
+        print("Computing Euclidean Distance for KNN...")
+        #    count=0
+
+        # list that stacks distance and class information for all test data
+        D_list = []
+        for test_image in test_px:
+            #       print("Computing for " + str(count) + "th test data")
+            #      count+=1
+
+            # temporary distance list that stacks between ONE test data and the whole training set
+            tmp_d = []
+            #     c = 0
+            for train_image in train_px:
+                diff = test_image - train_image
+                squared = np.square(diff)
+                summed = np.sum(squared)
+                d = np.sqrt(summed)
+                tmp_d.append(d)
+            #        c+=1
+
+            # print(str(c) + " th training data completed...")
+            dist_and_ot = list(zip(tmp_d, train_ot))
+            D_list.append(dist_and_ot)
+
+        print("Computing Euclidean Distance is NOW COMPLETED...")
+        print("Estimating CLASS Based on Distance...")
+
+        # using the distance information, we order it from the lowest to greatest and get K nearest training points with the test data.
+        # among the K nearest training points, we get their labels and using the voting system to get the estimated class for the test data.
+        EST_class = []
+        for k in K:
+            est_class = []
+            for test_d in D_list:
+                d_queue = sorted(test_d)[0:k]
+                est_ot = [d_queue[i][1] for i in range(len(d_queue))]
+                votes = [est_ot.count(ot) for ot in ot_set]
+                #  print("votes :", votes)
+                est_class.append(ot_set[votes.index(max(votes))])
+
+            EST_class.append(est_class)
+        # print(d_queue[0])
+
+        return (EST_class)
+
+    ######################################################################
+    # Calculate Accuracy
+    ######################################################################
+
+    def get_accuracy(test_label, est_label):
+
+        # check and calculate the accuracy of the estimation
+        correct = 0
+        for i in range(len(test_label)):
+            if est_label[i] == test_label[i]:
+                correct += 1
+
+            else:
+                continue
+
+        return (correct / len(test_label))
+
+    ######################################################################
+    # Execution of the Codes
+    ######################################################################
+    #
+    # train_file = sys.argv[1]
+    # test_file = sys.argv[2]
+    # model = sys.argv[3]
+
+    # if model=='nearest':
+    print('\n')
+    print('****************************************')
+    print("*****This code takes about 7.5 mins*****")
+    print('****************************************')
+    print('\n')
+    print('LOADING DATA...')
+
+    train_id, train_ot, train_px = readfile(model_file)
+    test_id, test_ot, test_px = readfile(train_test_file)
+    print('DATA LOADED...')
+
+    train_px = np.array(train_px)
+    test_px = np.array(test_px)
+
+    ot_set = ['0', '90', '180', '270']
+
+    # This K had the best accuracy among 1 to 50
+    K = [48]
+    # K = [k for k in range(1,51)]
+    est_class = k_nearest_neighbors(K, train_px, test_px, train_ot)
+    # for i in range(len(test_id)):
+    #    print(test_id[i] + ' ' + est_class[0][i])
+    # Outputting the test id and estimated class on txt file
+    with open("output_nearest.txt", 'w') as outputfile:
+        for i in range(len(test_id)):
+            outputfile.writelines(test_id[i] + ' ' + est_class[0][i] + '\n')
+
+    acc_for_diff_k = []
+    for cls in est_class:
+        acc_for_diff_k.append(get_accuracy(test_ot, cls))
+
+    for i in range(len(K)):
+        print("Accuracy for K = " + str(K[i]) + " is " + str(acc_for_diff_k[i]))
+
+    # else:
+    #    sys.exit()
+
+    ######################################################################
+    # Plotting Figures
+    ######################################################################
+    '''
+    plt.figure(1)
+    plt.plot(K, acc_for_diff_k, '.-', label = "Accuracy", color = 'red')
+    plt.title("KNN Accuracy Respect to K")
+    plt.xlabel("K")
+    plt.ylabel("Accuacy Values")
+    plt.legend(loc= "best")
+    plt.savefig("KNN_accuracy_1_K.png")
+    '''
 
 
+# =======
+# def trainNearest(train,model_file):
+#     pass
+# def testNearest(test,model_file):
+# pass
+# >>>>>>> 1735cf7b2853f95589d2b13f62c05d2f4d61a28d
+
+if __name__ == '__main__':
+
+    option = sys.argv[1]
+    train_test_file = sys.argv[2]
+    model_file = sys.argv[3]
+    model_used = sys.argv[4]
+
+
+    if(option == 'train'):
+
+        if(model_used == 'adaboost'):
+            trainAdaboost(train_test_file,model_file)
+
+        elif(model_used == 'nearest'):
+#<<<<<<< HEAD
+#=======
+            trainNearest(train_test_file,model_file)
+#>>>>>>> 1735cf7b2853f95589d2b13f62c05d2f4d61a28d
+
+        elif(model_used == 'forest'):
+            trainForest(train_test_file,model_file)
+
+
+        elif(model_used == 'best'):
+            trainNearest(train_test_file, model_file)
+
+    elif(option == 'test'):
+
+        if (model_used == 'adaboost'):
+            testAdaboost(train_test_file, model_file)
+
+        elif (model_used == 'nearest'):
+            testNearest(train_test_file, model_file)
+#<<<<<<< HEAD
+            
+#=======
+
+#>>>>>>> 1735cf7b2853f95589d2b13f62c05d2f4d61a28d
+        elif (model_used == 'forest'):
+            testForest(train_test_file, model_file)
+
+
+        elif (model_used == 'best'):
+#<<<<<<< HEAD
+            testNearest(train_test_file, model_file)
+#=======
+#            testNearest(train_test_file, model_file)
+#>>>>>>> 1735cf7b2853f95589d2b13f62c05d2f4d61a28d
